@@ -1,0 +1,9 @@
+timm
+tensorboard
+ml_collections
+opencv-python
+scikit-learn
+matplotlib
+einops
+torch
+torchvision
