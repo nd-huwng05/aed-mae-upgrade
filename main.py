@@ -1,7 +1,11 @@
+import warnings
+import os
+warnings.filterwarnings("ignore", category=FutureWarning)
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 import argparse
 import datetime
 import json
-import os
 import time
 from pathlib import Path
 

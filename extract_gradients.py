@@ -32,9 +32,6 @@ def compute_gradients(data_root_folder, step, folder):
             next_img = next_img.astype(np.int32)
             gradient = np.abs(previous_img-next_img)
             gradient = gradient.astype(np.uint8)
-            # Image.fromarray(gradient.astype(np.uint8)).show()
-            # Image.fromarray(previous_img.astype(np.uint8)).show()
-            # Image.fromarray(next_img.astype(np.uint8)).show()
             os.makedirs(os.path.join(data_root_folder, f"{folder}/gradients2/{os.path.basename(video)}"), exist_ok=True)
             gradient = cv2.cvtColor(gradient, cv2.COLOR_BGR2RGB)
             Image.fromarray(gradient).save(os.path.join(data_root_folder, f"{folder}/gradients2/{os.path.basename(video)}",
