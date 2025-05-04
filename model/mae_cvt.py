@@ -5,9 +5,11 @@ from einops import rearrange
 from torch import nn
 import torch.nn.functional as F
 from torch.nn import BCELoss
+import random
 
-from model.cvt import ConvEmbed, Block
+from model.cvt import ConvEmbed, Block, MaskingNetwork
 from util.morphology import Erosion2d, Dilation2d
+import math
 
 
 class MaskedAutoencoderCvT(nn.Module):
@@ -42,6 +44,12 @@ class MaskedAutoencoderCvT(nn.Module):
             padding=0,
             embed_dim=embed_dim,
             norm_layer=norm_layer
+        )
+
+        self.score_net = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, 1)
         )
         self.patch_size = patch_size
         self.num_patches = img_size[0] // patch_size * img_size[1] // patch_size
@@ -100,6 +108,8 @@ class MaskedAutoencoderCvT(nn.Module):
             param.requires_grad = False
         for param in self.decoder_pred.parameters():
             param.requires_grad = False
+        for param in self.score_net.parameters():
+            param.requires_grad = False
         for i in range(0, len(self.decoder_blocks)):
             for param in self.decoder_blocks[i].parameters():
                 param.requires_grad = False
@@ -134,6 +144,88 @@ class MaskedAutoencoderCvT(nn.Module):
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], self.out_chans, h * p, w * p))
         return imgs
+
+    def strategy_masking_eff(self, x, mask_ratio, grand_mask):
+        """
+        Perform per-sample random masking by per-sample shuffling.
+        Per-sample shuffling is done by argsort random noise.
+        x: [N, L, D], sequence
+        """
+
+        alpha = 0
+        parts_num = 10
+        scale_factor = 2
+        tk_parts_dic = {}
+        N, D, H, W = x.shape
+        L = H * W
+        x = rearrange(x, 'b c h w -> b (h w) c')
+        len_keep = int(L * (1 - mask_ratio))
+
+        for i in range(L):
+            tk_parts_dic[i] = random.randint(0, parts_num - 1)
+        tk_parts_dic = list(tk_parts_dic.values())
+        tk_parts_dic = torch.tensor(tk_parts_dic, device=x.device)
+        tk_parts_dic = tk_parts_dic.repeat(N, 1)
+
+        noise = torch.rand(N, 1, H // scale_factor, W // scale_factor, device=x.device)  # noise in [0, 1]
+        noise = torch.nn.functional.interpolate(noise, size=[H, W], mode='bilinear', )
+        noise = noise.view(N, L)
+
+        parts_noise_asign = torch.rand(N, parts_num, device=x.device)
+        parts_noise = torch.gather(parts_noise_asign, dim=1, index=tk_parts_dic)
+        # parts_noise=torch.gather(parts_noise_asign.unsqueeze(2), dim=1, index=tk_parts_dic.unsqueeze(2))
+
+        noise = noise + alpha * parts_noise
+
+        # sort noise for each sample
+        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_shuffle[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        # generate the binary mask: 0 is keep, 1 is remove
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        # unshuffle to get the binary mask
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+
+        self.masked_H = H
+        self.masked_W = int(W * (1. - mask_ratio))
+        self.H = H
+        self.W = W
+        return x_masked, mask, ids_restore
+
+    def learning_masking(self, x, mask_ratio, grad_mask):
+        N, D, H, W = x.shape
+        L = H * W
+        x_patches = rearrange(x, 'b c h w -> b (h w) c')
+        len_keep = int(L * (1 - mask_ratio))
+
+        # Predict score for each patch
+        scores = self.score_net(x_patches).squeeze(-1)  # [N, L]
+
+        # Select top-k important patches
+        ids_sorted = torch.argsort(scores, dim=1, descending=True)  # [N, L]
+        ids_keep = ids_sorted[:, :len_keep]  # [N, len_keep]
+
+        # Gather kept patches
+        x_masked = torch.gather(x_patches, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))  # [N, len_keep, D]
+
+        # Generate binary mask: 0 = keep, 1 = mask
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        mask = torch.gather(mask, dim=1, index=torch.argsort(ids_sorted, dim=1))  # [N, L]
+
+        # Compute ids_restore to restore original order
+        ids_restore = torch.argsort(ids_sorted, dim=1)  # [N, L]
+
+        self.masked_H = H
+        self.masked_W = int(W * (1. - mask_ratio))
+        self.H = H
+        self.W = W
+        return x_masked, mask, ids_restore
 
     def random_masking(self, x, mask_ratio, grad_mask):
         """
@@ -318,7 +410,6 @@ class MaskedAutoencoderCvT(nn.Module):
         latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio, grad_mask)
 
         if self.train_TS is False:
-
             pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
             loss = self.forward_loss(targets, grad_mask, pred, mask)
             b, c, h, w = targets.shape

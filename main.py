@@ -64,8 +64,8 @@ def main(args):
     if args.run_type == "train":
         do_training(args, data_loader_test, data_loader_train, device, log_writer, model)
     elif args.run_type == "inference":
-        student = torch.load(args.output_dir + "/checkpoint-best-student.pth")['model']
-        teacher = torch.load(args.output_dir + "/checkpoint-best.pth")['model']
+        student = torch.load(args.output_dir + "/checkpoint-best-student.pth", weights_only=False)['model']
+        teacher = torch.load(args.output_dir + "/checkpoint-best.pth", weights_only=False)['model']
         for key in student:
             if 'student' in key:
                 teacher[key] = student[key]
@@ -128,7 +128,7 @@ def do_training_student(args, data_loader_test, data_loader_train, device, log_w
     print(optimizer)
     loss_scaler = NativeScaler()
     best_AUC = {"micro": 0.0, "macro": 0.0}
-    if args.resume_TS and os.path.exists("checkpoint-latest-teacher.pth"):
+    if args.resume_TS and os.path.exists("checkpoint-latest-student.pth"):
         best_AUC = misc.load_model_AUC(args=args, model=model, optimizer=optimizer, loss_scaler=loss_scaler)
     else:
         misc.load_model_best(args=args, model=model, optimizer=optimizer, loss_scaler=loss_scaler)
@@ -152,10 +152,10 @@ def do_training_student(args, data_loader_test, data_loader_train, device, log_w
         if test_stats['micro'] > best_AUC["micro"]:
             best_AUC = test_stats
             misc.save_model(args=args, model=model, optimizer=optimizer,
-                            loss_scaler=loss_scaler, epoch=epoch, best=True, AUC_best=best_AUC)
+                            loss_scaler=loss_scaler, epoch=epoch, best=True, AUC_best=best_AUC, student=True)
         if args.output_dir:
             misc.save_model(args=args, model=model, optimizer=optimizer,
-                            loss_scaler=loss_scaler, epoch=epoch, latest=True, AUC_best=best_AUC)
+                            loss_scaler=loss_scaler, epoch=epoch, latest=True, AUC_best=best_AUC, student=True)
 
         if args.output_dir:
             if log_writer is not None:
