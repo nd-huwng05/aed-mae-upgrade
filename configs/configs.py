@@ -8,7 +8,7 @@ def get_configs_avenue():
     config.mask_ratio = 0.5
     config.epochs_TS = 100
     config.is_train_TS = False
-    config.masking_method = "motion_grad_masking"
+    config.masking_method = "random_masking"
     config.output_dir = "../experiments/avenue"  # the checkpoints will be loaded from here
     config.abnormal_score_func = 'L2'
     config.grad_weighted_rec_loss = True

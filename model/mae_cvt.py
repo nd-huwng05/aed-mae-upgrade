@@ -135,57 +135,6 @@ class MaskedAutoencoderCvT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], self.out_chans, h * p, w * p))
         return imgs
 
-    def motion_grad_masking(self, x, mask_ratio, grad_mask, mask_type='low'):
-        """
-        Perform masking based on motion gradients.
-        The idea is to mask regions with either high or low motion (high or low gradient) between consecutive frames or patches.
-
-        x: [N, C, H, W], input tensor (batch of images or video frames)
-        mask_ratio: ratio of masked patches
-        grad_mask: the gradient of the output with respect to the input (after backward pass)
-        mask_type: 'high' to mask high motion regions, 'low' to mask low motion regions
-        """
-        N, C, H, W = x.shape  # batch, channels, height, width
-        L = H * W
-        x = rearrange(x, 'b c h w -> b (h w) c')
-        len_keep = int(L * (1 - mask_ratio))  # Number of patches to keep
-
-        # Calculate motion gradient magnitude, assuming 'grad_mask' captures the gradient over time or across frames.
-        motion_grad = grad_mask.norm(dim=1)  # Reduce over the channels to get motion magnitude in each spatial location
-
-        # Pool gradients to get patch-level motion magnitude
-        motion_grad_pooled = F.max_pool2d(motion_grad, self.patch_size)  # Pooling to get patch-wise motion magnitude
-        motion_grad_pooled = rearrange(motion_grad_pooled, 'b h w -> b (h w)')  # Flatten spatial dimensions
-
-        # Sort the motion magnitudes based on the selected mask_type ('high' or 'low')
-        if mask_type == 'high':
-            # Mask regions with high motion (high gradient)
-            ids_shuffle = torch.argsort(motion_grad_pooled, dim=1, descending=True)
-        elif mask_type == 'low':
-            # Mask regions with low motion (low gradient)
-            ids_shuffle = torch.argsort(motion_grad_pooled, dim=1, descending=False)
-        else:
-            raise ValueError("mask_type must be 'high' or 'low'")
-
-        ids_restore = torch.argsort(ids_shuffle, dim=1)
-
-        # Keep the patches with the selected motion type (high or low)
-        ids_keep = ids_shuffle[:, :len_keep]
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C))
-
-        # Generate the binary mask: 0 is keep, 1 is remove
-        mask = torch.ones([N, L], device=x.device)
-        mask[:, :len_keep] = 0
-        # Unshuffle to get the binary mask
-        mask = torch.gather(mask, dim=1, index=ids_restore)
-
-        self.masked_H = H
-        self.masked_W = int(W * (1. - mask_ratio))
-        self.H = H
-        self.W = W
-
-        return x_masked, mask, ids_restore
-
     def random_masking(self, x, mask_ratio, grad_mask):
         """
         Perform per-sample random masking by per-sample shuffling.
@@ -256,31 +205,22 @@ class MaskedAutoencoderCvT(nn.Module):
     def forward_encoder(self, x, mask_ratio, grad_mask):
         # embed patches
         x = self.patch_embed(x)
-        img = x
 
         # add pos embed w/o cls token
         # x = x + self.pos_embed[:, 1:, :]
 
         # masking: length -> length * mask_ratio
         x, mask, ids_restore = self.masking(x, mask_ratio, grad_mask)
-        img, _, _ = self.masking(img, mask_ratio, grad_mask)
         # x = rearrange(x, 'b c h w -> b (h w) c')
         # append cls token
         cls_token = self.cls_token
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
-        img = torch.cat((cls_tokens, img), dim=1)
 
         # apply Transformer blocks
         for blk in self.blocks:
             x = blk(x, self.masked_H, self.masked_W)
-            img = blk(img, self.masked_H, self.masked_W)
-        img = self.norm(img)
         x = self.norm(x)
-
-        _, x = torch.split(x, [1, self.masked_H * self.masked_W], 1)
-        cls_tokens, x = torch.split(img, [1, self.masked_H * self.masked_W], 1)
-        x = torch.cat((cls_tokens, x), dim=1)
 
         return x, mask, ids_restore
 
@@ -387,7 +327,7 @@ class MaskedAutoencoderCvT(nn.Module):
             target_labels = einops.rearrange(target_labels, 'b p->(b p)', p=num_patches)
             flatten_mask = einops.rearrange(mask, 'b p->(b p)', p=num_patches)
             target_labels = target_labels[flatten_mask == 0]
-            target_labels = einops.rearrange(target_labels, "(b p)-> b p", p=int(num_patches * (1-mask_ratio)))
+            target_labels = einops.rearrange(target_labels, "(b p)-> b p", p=int(num_patches * mask_ratio))
             target_labels = (target_labels != -1) * 1
             # cls_token = latent[:, -1]
             pred_anomalies = torch.sigmoid(self.cls_anomalies(latent[:, 1:, :]).squeeze())
@@ -462,6 +402,7 @@ class MaskedAutoencoderCvT(nn.Module):
             output.append(torch.abs(imgs - pred_teacher).mean((2)))
             return [output[0].mean(1), output[1].mean(1)]
         elif self.abnormal_score_func_TS == "L2":
+
             output.append((((pred_teacher - pred_stud) ** 2).mean(2)))
             output.append((((imgs - pred_teacher) ** 2).mean(2)))
             return [output[0].mean(1), output[1].mean(1), pred_anomalies.mean(1)]
